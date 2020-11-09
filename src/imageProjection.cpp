@@ -63,7 +63,13 @@ private:
     double *imuRotY = new double[queueLength];
     double *imuRotZ = new double[queueLength];
 
+    double *odomTime = new double[queueLength];
+    double *odomRotX = new double[queueLength];
+    double *odomRotY = new double[queueLength];
+    double *odomRotZ = new double[queueLength];
+
     int imuPointerCur;
+    int odomPointerCur;
     bool firstPointFlag;
     Eigen::Affine3f transStartInverse;
 
@@ -313,12 +319,17 @@ public:
             // get angular velocity
             double angular_x, angular_y, angular_z;
             imuAngular2rosAngular(&thisImuMsg, &angular_x, &angular_y, &angular_z);
-
+            
             // integrate rotation
             double timeDiff = currentImuTime - imuTime[imuPointerCur-1];
-            imuRotX[imuPointerCur] = imuRotX[imuPointerCur-1] + angular_x * timeDiff;
-            imuRotY[imuPointerCur] = imuRotY[imuPointerCur-1] + angular_y * timeDiff;
-            imuRotZ[imuPointerCur] = imuRotZ[imuPointerCur-1] + angular_z * timeDiff;
+            // imuRotX[imuPointerCur] = imuRotX[imuPointerCur-1] + angular_x * timeDiff;
+            // imuRotY[imuPointerCur] = imuRotY[imuPointerCur-1] + angular_y * timeDiff;
+            // imuRotZ[imuPointerCur] = imuRotZ[imuPointerCur-1] + angular_z * timeDiff;
+            // double angular_roll, angular_pitch, angular_yaw;
+            imuRPY2rosRPY(&thisImuMsg, &angular_roll, &angular_pitch, &angular_yaw);
+            imuRotX[imuPointerCur] = imuRotX[imuPointerCur-1] + angular_roll* timeDiff;
+            imuRotY[imuPointerCur] = imuRotY[imuPointerCur-1] + angular_pitch* timeDiff;
+            imuRotZ[imuPointerCur] = imuRotZ[imuPointerCur-1] + angular_yaw* timeDiff;
             imuTime[imuPointerCur] = currentImuTime;
             ++imuPointerCur;
         }
@@ -330,7 +341,7 @@ public:
 
         cloudInfo.imuAvailable = true;
     }
-
+    
     void odomDeskewInfo()
     {
         cloudInfo.odomAvailable = false;
@@ -351,67 +362,128 @@ public:
 
         // get start odometry at the beinning of the scan
         nav_msgs::Odometry startOdomMsg;
+        cloudInfo.odomAvailable = true;
+
+        odomPointerCur = 0;
 
         for (int i = 0; i < (int)odomQueue.size(); ++i)
         {
             startOdomMsg = odomQueue[i];
 
-            if (ROS_TIME(&startOdomMsg) < timeScanCur)
-                continue;
-            else
+
+            double currentImuTime = ROS_TIME(&startOdomMsg);
+
+            tf::Quaternion orientation;
+            tf::quaternionMsgToTF(startOdomMsg.pose.pose.orientation, orientation);
+
+            double roll, pitch, yaw;
+            tf::Matrix3x3(orientation).getRPY(roll, pitch, yaw);
+
+            // Initial guess used in mapOptimization
+            cloudInfo.initialGuessX = startOdomMsg.pose.pose.position.x;
+            cloudInfo.initialGuessY = startOdomMsg.pose.pose.position.y;
+            cloudInfo.initialGuessZ = startOdomMsg.pose.pose.position.z;
+            cloudInfo.initialGuessRoll  = roll;
+            cloudInfo.initialGuessPitch = pitch;
+            cloudInfo.initialGuessYaw   = yaw;
+
+            // get roll, pitch, and yaw estimation for this scan
+            if (currentImuTime <= timeScanCur)
+            {
+                cloudInfo.imuRollInit = roll;
+                cloudInfo.imuPitchInit = roll;
+                cloudInfo.imuYawInit = roll;
+            }              
+
+            if (currentImuTime > timeScanEnd + 0.01)
                 break;
+
+            if (odomPointerCur == 0){
+                odomRotX[0] = 0;
+                odomRotY[0] = 0;
+                odomRotZ[0] = 0;
+                odomTime[0] = currentImuTime;
+                ++odomPointerCur;
+                continue;
+            }
+            
+            // integrate rotation
+            double timeDiff = currentImuTime - imuTime[odomPointerCur-1];            
+            
+            odomRotX[odomPointerCur] = odomRotX[odomPointerCur-1] + roll* timeDiff;
+            odomRotY[odomPointerCur] = odomRotY[odomPointerCur-1] + pitch* timeDiff;
+            odomRotZ[odomPointerCur] = odomRotZ[odomPointerCur-1] + yaw* timeDiff;
+            odomTime[odomPointerCur] = currentImuTime;
+            ++odomPointerCur;
+
         }
 
-        tf::Quaternion orientation;
-        tf::quaternionMsgToTF(startOdomMsg.pose.pose.orientation, orientation);
+        --odomPointerCur;
 
-        double roll, pitch, yaw;
-        tf::Matrix3x3(orientation).getRPY(roll, pitch, yaw);
-
-        // Initial guess used in mapOptimization
-        cloudInfo.initialGuessX = startOdomMsg.pose.pose.position.x;
-        cloudInfo.initialGuessY = startOdomMsg.pose.pose.position.y;
-        cloudInfo.initialGuessZ = startOdomMsg.pose.pose.position.z;
-        cloudInfo.initialGuessRoll  = roll;
-        cloudInfo.initialGuessPitch = pitch;
-        cloudInfo.initialGuessYaw   = yaw;
-
-        cloudInfo.odomAvailable = true;
+        if (odomPointerCur <= 0)
+            return;
 
         // get end odometry at the end of the scan
-        odomDeskewFlag = false;
+        // odomDeskewFlag = false;
 
-        if (odomQueue.back().header.stamp.toSec() < timeScanEnd)
-            return;
+        // if (odomQueue.back().header.stamp.toSec() < timeScanEnd)
+        //     return;
 
-        nav_msgs::Odometry endOdomMsg;
+        // nav_msgs::Odometry endOdomMsg;
 
-        for (int i = 0; i < (int)odomQueue.size(); ++i)
+        // for (int i = 0; i < (int)odomQueue.size(); ++i)
+        // {
+        //     endOdomMsg = odomQueue[i];
+
+        //     if (ROS_TIME(&endOdomMsg) < timeScanEnd)
+        //         continue;
+        //     else
+        //         break;
+        // }
+
+        // if (int(round(startOdomMsg.pose.covariance[0])) != int(round(endOdomMsg.pose.covariance[0])))
+        //     return;
+
+        // Eigen::Affine3f transBegin = pcl::getTransformation(startOdomMsg.pose.pose.position.x, startOdomMsg.pose.pose.position.y, startOdomMsg.pose.pose.position.z, roll, pitch, yaw);
+
+        // tf::quaternionMsgToTF(endOdomMsg.pose.pose.orientation, orientation);
+        // tf::Matrix3x3(orientation).getRPY(roll, pitch, yaw);
+        // Eigen::Affine3f transEnd = pcl::getTransformation(endOdomMsg.pose.pose.position.x, endOdomMsg.pose.pose.position.y, endOdomMsg.pose.pose.position.z, roll, pitch, yaw);
+
+        // Eigen::Affine3f transBt = transBegin.inverse() * transEnd;
+
+        // float rollIncre, pitchIncre, yawIncre;
+        // pcl::getTranslationAndEulerAngles(transBt, odomIncreX, odomIncreY, odomIncreZ, rollIncre, pitchIncre, yawIncre);
+
+        // odomDeskewFlag = true;
+    }
+
+    void findRotationFromOdom(double pointTime, float *rotXCur, float *rotYCur, float *rotZCur)
+    {
+        *rotXCur = 0; *rotYCur = 0; *rotZCur = 0;
+
+        int odomPointerFront = 0;
+        while (odomPointerFront < odomPointerCur)
         {
-            endOdomMsg = odomQueue[i];
-
-            if (ROS_TIME(&endOdomMsg) < timeScanEnd)
-                continue;
-            else
+            if (pointTime < odomTime[odomPointerFront])
                 break;
+            ++odomPointerFront;
         }
 
-        if (int(round(startOdomMsg.pose.covariance[0])) != int(round(endOdomMsg.pose.covariance[0])))
-            return;
-
-        Eigen::Affine3f transBegin = pcl::getTransformation(startOdomMsg.pose.pose.position.x, startOdomMsg.pose.pose.position.y, startOdomMsg.pose.pose.position.z, roll, pitch, yaw);
-
-        tf::quaternionMsgToTF(endOdomMsg.pose.pose.orientation, orientation);
-        tf::Matrix3x3(orientation).getRPY(roll, pitch, yaw);
-        Eigen::Affine3f transEnd = pcl::getTransformation(endOdomMsg.pose.pose.position.x, endOdomMsg.pose.pose.position.y, endOdomMsg.pose.pose.position.z, roll, pitch, yaw);
-
-        Eigen::Affine3f transBt = transBegin.inverse() * transEnd;
-
-        float rollIncre, pitchIncre, yawIncre;
-        pcl::getTranslationAndEulerAngles(transBt, odomIncreX, odomIncreY, odomIncreZ, rollIncre, pitchIncre, yawIncre);
-
-        odomDeskewFlag = true;
-    }
+        if (pointTime > odomTime[odomPointerFront] || odomPointerFront == 0)
+        {
+            *rotXCur = odomRotX[odomPointerFront];
+            *rotYCur = odomRotY[odomPointerFront];
+            *rotZCur = odomRotZ[odomPointerFront];
+        } else {
+            int odomPointerBack = odomPointerFront - 1;
+            double ratioFront = (pointTime - odomTime[odomPointerBack]) / (odomTime[odomPointerFront] - odomTime[odomPointerBack]);
+            double ratioBack = (odomTime[odomPointerFront] - pointTime) / (odomTime[odomPointerFront] - odomTime[odomPointerBack]);
+            *rotXCur = odomRotX[odomPointerFront] * ratioFront + odomRotX[odomPointerBack] * ratioBack;
+            *rotYCur = odomRotY[odomPointerFront] * ratioFront + odomRotY[odomPointerBack] * ratioBack;
+            *rotZCur = odomRotZ[odomPointerFront] * ratioFront + odomRotZ[odomPointerBack] * ratioBack;
+        }
+    }    
 
     void findRotation(double pointTime, float *rotXCur, float *rotYCur, float *rotZCur)
     {
@@ -456,6 +528,38 @@ public:
         // *posZCur = ratio * odomIncreZ;
     }
 
+    PointType deskewPointFromOdom(PointType *point, double relTime)
+    {
+        if (deskewFlag == -1 || cloudInfo.odomAvailable == false)
+            return *point;
+
+        double pointTime = timeScanCur + relTime;
+
+        float rotXCur, rotYCur, rotZCur;
+        // findRotation(pointTime, &rotXCur, &rotYCur, &rotZCur);
+        findRotationFromOdom(pointTime, &rotXCur, &rotYCur, &rotZCur);
+        float posXCur, posYCur, posZCur;
+        findPosition(relTime, &posXCur, &posYCur, &posZCur);
+
+        if (firstPointFlag == true)
+        {
+            transStartInverse = (pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur)).inverse();
+            firstPointFlag = false;
+        }
+
+        // transform points to start
+        Eigen::Affine3f transFinal = pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur);
+        Eigen::Affine3f transBt = transStartInverse * transFinal;
+
+        PointType newPoint;
+        newPoint.x = transBt(0,0) * point->x + transBt(0,1) * point->y + transBt(0,2) * point->z + transBt(0,3);
+        newPoint.y = transBt(1,0) * point->x + transBt(1,1) * point->y + transBt(1,2) * point->z + transBt(1,3);
+        newPoint.z = transBt(2,0) * point->x + transBt(2,1) * point->y + transBt(2,2) * point->z + transBt(2,3);
+        newPoint.intensity = point->intensity;
+
+        return newPoint;
+    }
+
     PointType deskewPoint(PointType *point, double relTime)
     {
         if (deskewFlag == -1 || cloudInfo.imuAvailable == false)
@@ -464,8 +568,8 @@ public:
         double pointTime = timeScanCur + relTime;
 
         float rotXCur, rotYCur, rotZCur;
-        findRotation(pointTime, &rotXCur, &rotYCur, &rotZCur);
-
+        // findRotation(pointTime, &rotXCur, &rotYCur, &rotZCur);
+        findRotationFromOdom(pointTime, &rotXCur, &rotYCur, &rotZCur);
         float posXCur, posYCur, posZCur;
         findPosition(relTime, &posXCur, &posYCur, &posZCur);
 
@@ -526,6 +630,7 @@ public:
                 continue;
 
             thisPoint = deskewPoint(&thisPoint, laserCloudIn->points[i].time); // Velodyne
+            // thisPoint = deskewPointFromOdom(&thisPoint, laserCloudIn->points[i].time); // Velodyne            
             // thisPoint = deskewPoint(&thisPoint, (float)laserCloudIn->points[i].t / 1000000000.0); // Ouster
 
             rangeMat.at<float>(rowIdn, columnIdn) = pointDistance(thisPoint);
